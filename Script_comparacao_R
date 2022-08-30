@@ -229,10 +229,11 @@ cbind(freq=table(data_set_original[,TARGET]), perc=prop.table(table(data_set_ori
 seed<-1
 fold<-10
 var_importance<-F
-id_randomforest<-T
-id_glm<-T
-id_rpart<-T
+id_randomforest<-F
+id_glm<-F
+id_rpart<-F
 id_ann<-T
+#dataset<-data_set_original
 
 for(seed in 1:3){#seed.........................................................................................................................
   set.seed(seed)
@@ -249,7 +250,7 @@ for(seed in 1:3){#seed..........................................................
     #seleciona apenas dados numéricos
     #TRAIN_VECTOR<- rownames(data.frame(which(sapply( dataset, class ) == 'numeric' )))
     #TRAIN_VECTOR<-setdiff(TRAIN_VECTOR,c(TARGET,'ID_AMOSTRA','SEQ_ID','random1'))
-    TRAIN_VECTOR<-c('C','Si','Mn','P','Al','Nb','Ti','B','Cu','Cr','N','CEQV','Corte')
+    TRAIN_VECTOR<-c('C','Si','Mn','P','Al','Nb','Ti','B','Cu','Cr','N','Corte')
     
     dataset_ann<-apply(data_set_original[,c(TRAIN_VECTOR,TARGET)], MARGIN = 2, FUN = function(X) (X - min(X))/diff(range(X)))
     dataset_amostra_ann<-dataset_ann[testIndexes,]
@@ -261,17 +262,17 @@ for(seed in 1:3){#seed..........................................................
           formula_lm  <- as.formula(paste(TARGET, "~", paste(TRAIN_VECTOR, collapse="+")))
           
           dtini_full<-Sys.time()
-          fit <- rpart(formula = formula_lm,method ="class" , data = dataset,control = rpart.control(minsplit=40,cp = 0.001,maxdepth =5))
+          fit <- rpart(formula = formula_lm,method ="class" , data = dataset,control = rpart.control(minsplit=70,cp = 0.008,maxdepth =4))
           dtfim_full<-Sys.time()
           tempo_full<-as.numeric(difftime(dtfim_full, dtini_full, units = c("secs")), units = "secs")/60
           
           y_pred <- predict(fit, newdata = dataset_amostra,type="prob")
           df_compilado<-data.frame(ytest =as.vector(dataset_amostra[,TARGET]),yprobpred=as.vector(y_pred[,2]))
           resumo_temp<-nfold_check(df_compilado[,1],df_compilado[,2],infoextra='rpart', infoextra2='Rpart',seed=seed)
-          comparacao_dados<-rbind(comparacao_dados,data.frame(resumo_temp,Modelo='Rpart',Fold=fold,Seed=seed,tempo=tempo_full))
+          comparacao_dados<-rbind(comparacao_dados,data.frame(resumo_temp,Modelo='Decision Tree',Fold=fold,Seed=seed,tempo=tempo_full))
           rpart.plot(fit)
           
-          rm(fit,y_pred,df_compilado,resumo_temp)
+          rm(fit,y_pred,df_compilado,resumo_temp,tempo_full)
           }#Executa rpart....................................
     
     
@@ -284,16 +285,17 @@ for(seed in 1:3){#seed..........................................................
           y_pred <- predict(classifier, newdata = dataset_amostra,type="prob")
           df_compilado<-data.frame(ytest =as.vector(dataset_amostra[,TARGET]),yprobpred=as.vector(y_pred[,2]))
           resumo_temp<-nfold_check(df_compilado[,1],df_compilado[,2],infoextra='rf', infoextra2='RF',seed=seed)
-          comparacao_dados<-rbind(comparacao_dados,data.frame(resumo_temp,Modelo='RF',Fold=fold,Seed=seed,tempo=tempo_full))
+          comparacao_dados<-rbind(comparacao_dados,data.frame(resumo_temp,Modelo='RandomForest',Fold=fold,Seed=seed,tempo=tempo_full))
           
           if(var_importance==T){
             importancia_temp<-importance(classifier)
+            #plot(varImpPlot(Importancia_Variaveis))
             if(exists("importancia")){
               importancia_temp<-data.frame(variaveis=rownames(importancia_temp),importancia_temp[][],seed=seed,fold=fold,amostragem=tipo_amostragem_simples)
               importancia<-rbind(importancia,importancia_temp)
             }else{
               importancia<-data.frame(variaveis=rownames(importancia_temp),importancia_temp[][],seed=seed,fold=fold,amostragem=tipo_amostragem_simples)}}
-          rm(classifier,y_pred,df_compilado,resumo_temp)
+          rm(classifier,y_pred,df_compilado,resumo_temp,tempo_full)
         }#Executa random forest....................................
         
     
@@ -314,20 +316,20 @@ for(seed in 1:3){#seed..........................................................
           y_pred<-data.frame(Y=predict(logitMod, dataset_amostra, type="response"))  
           df_compilado<-data.frame(ytest =as.vector(dataset_amostra[,TARGET]),yprobpred=as.vector(y_pred[,1]))
           resumo_temp<-nfold_check(df_compilado[,1],df_compilado[,2],infoextra='RL', infoextra2='RL',seed=seed)
-          comparacao_dados<-rbind(comparacao_dados,data.frame(resumo_temp,Modelo='RL',Fold=fold,Seed=seed,tempo=tempo_full))
+          comparacao_dados<-rbind(comparacao_dados,data.frame(resumo_temp,Modelo='Log. Regression',Fold=fold,Seed=seed,tempo=tempo_full))
           
           summary(logitMod)
           
-          rm(logitMod,y_pred,df_compilado,resumo_temp)
+          rm(logitMod,y_pred,df_compilado,resumo_temp,tempo_full)
         }#Executa glm.................................................................................................................................................
     
         if(id_ann==T){
-          nneuronio<-c(length(TRAIN_VECTOR),length(TRAIN_VECTOR)*2+1)
+          nneuronio<-c(length(TRAIN_VECTOR)-4,length(TRAIN_VECTOR)-2,length(TRAIN_VECTOR),length(TRAIN_VECTOR)*2+1)
+
           for(nn_temp in nneuronio){
             formula = paste(TARGET, "~", paste(TRAIN_VECTOR, collapse="+"))
-            
             dtini_full<-Sys.time()
-            ANN <- neuralnet(formula,data = dataset_ann,threshold = 0.1049,hidden = c(nn_temp),
+            ANN <- neuralnet(formula,data = dataset_ann,threshold = 0.1040,hidden = c(nn_temp),
                              act.fct='logistic',lifesign = 'full',stepmax=150000,rep=1,linear.output=F)
             dtfim_full<-Sys.time()
             tempo_full<-as.numeric(difftime(dtfim_full, dtini_full, units = c("secs")), units = "secs")/60
@@ -339,7 +341,7 @@ for(seed in 1:3){#seed..........................................................
             df_compilado<-data.frame(ytest =as.vector(dataset_amostra_ann[,TARGET]),yprobpred=as.vector(y_pred[,1]))
             resumo_temp<-nfold_check(df_compilado[,1],df_compilado[,2],infoextra=paste0('ANN',nn_temp), infoextra2='tipo_amostragem',seed=seed)
             comparacao_dados<-rbind(comparacao_dados,data.frame(resumo_temp,Modelo=paste0('ANN',nn_temp),Fold=fold,Seed=seed,tempo=tempo_full))
-            rm(ANN,y_pred,df_compilado,resumo_temp)
+            rm(ANN,y_pred,df_compilado,resumo_temp,tempo_full)
           }
         }
    
@@ -385,7 +387,7 @@ min.mean.sd.max <- function(x) {
 p1 <- ggplot(data=mydata, aes(x=mydata[,Classe], y=mydata[,Metrica]))
 p1 <- p1 + theme_classic()+
   stat_summary(fun.data = min.mean.sd.max, geom = "boxplot", shape=18) +
-  geom_text(data = means, aes(label = means[,Metrica],x = means[,Classe], y = means[,Metrica] ), vjust = -0.40, hjust = -0.80)+
+  geom_text(data = means, aes(label = format(round(means[,Metrica],2),nsmall = 2,scientific = FALSE),x = means[,Classe], y = means[,Metrica] ), vjust = -0.65, hjust = -0.99)+
   geom_jitter(position=position_jitter(width=.2), size=3) + 
   ggtitle(paste0("Boxplot - ", Metrica," Comparação (3x10fold-CV)")) + xlab(Classe) + ylab(Metrica)+
   theme(text = element_text(size=20),axis.text.x = element_text(angle=45, hjust=1),legend.position = "none")+
@@ -404,7 +406,7 @@ BD ='AmostragemBS.csv'
 data_set_original <- read.table(file = BD, header = TRUE, sep=';',dec = ",", stringsAsFactors = FALSE)
 str(data_set_original)
 
-filtro<-data_set_original$Corte<=500 
+filtro<-data_set_original$Corte<=500 & data_set_original$Corte>0 
 filtro_C_Mn<- filtro & data_set_original$C<=0.20 & data_set_original$Mn<=0.8 & data_set_original$Nb<=0.01 &
              data_set_original$Ti<=0.01 & data_set_original$Cr<=0.1 & data_set_original$Cu<=0.1 & data_set_original$Al<=0.1
 filtro_Q7<- filtro & data_set_original$C>=0.05 & data_set_original$Mn>=1.2 & data_set_original$Nb>=0.02 &
@@ -419,7 +421,43 @@ par(mfrow = c(4, 4))
 colunas_interesse<-c('C','Si','Mn','P','S','Al','Nb','Ti','V','B','Cu','Cr','Ni','N','CEQV','Corte')
 for(i in colunas_interesse)
   hist(dataset_filtro[,i], main = i, xlab = ifelse(i=='Corte','mm','%'),axes = T,probability = T)
-summary(dataset_filtro[,colunas_interesse])
+
+
+rm("dados_sumarizados")
+decimal_places<-4
+for(coluna in c(colunas_interesse,'ID_DEF')){
+  mtx<-t(data.frame(cor(x=dataset_filtro[,coluna],dataset_filtro[,setdiff(colunas_interesse,coluna)])))
+  dados_sumarizados_temp<-data.frame(Variável=paste(coluna),
+                                     Média=format(round(mean(dataset_filtro[,coluna]), decimal_places), nsmall = decimal_places),
+                                     Mediana=format(round(median(dataset_filtro[,coluna]), decimal_places), nsmall = decimal_places),
+                                     DesvPad=format(round(sd(dataset_filtro[,coluna]), decimal_places), nsmall = decimal_places),
+                                     Min=format(round(min(dataset_filtro[,coluna]), decimal_places), nsmall = decimal_places),
+                                     Percentil1=format(round(quantile(dataset_filtro[,coluna],p=0.01), decimal_places), nsmall = decimal_places),
+                                     Percentil25=format(round(quantile(dataset_filtro[,coluna],p=0.25), decimal_places), nsmall = decimal_places),
+                                     Percentil75=format(round(quantile(dataset_filtro[,coluna],p=0.75), decimal_places), nsmall = decimal_places),
+                                     Percentil99=format(round(quantile(dataset_filtro[,coluna],p=0.99), decimal_places), nsmall = decimal_places),
+                                     Max=format(round(max(dataset_filtro[,coluna]), decimal_places), nsmall = decimal_places),
+                                     qtde=length(dataset_filtro[,coluna]),
+                                     R_Maior0.7=paste(names(mtx[mtx>=0.70,]), collapse=";"),stringsAsFactors = FALSE,row.names = NULL)
+  if(!exists("dados_sumarizados")){dados_sumarizados<-dados_sumarizados_temp}else{ dados_sumarizados<-rbind(dados_sumarizados,dados_sumarizados_temp)}}
+print(dados_sumarizados)
+
+
+
+library(corrplot)
+par(mfrow = c(1, 1))
+corrplot(cor(dataset_filtro[,c(colunas_interesse,'ID_DEF')]),        # Correlation matrix
+         method="color", # Correlation plot method
+         type = "upper",    # Correlation plot style (also "upper" and "lower")
+         diag = F,      # If TRUE (default), adds the diagonal
+         tl.col = "black", # Labels color
+         bg = "white",     # Background color
+         title = "",       # Main title
+         addCoef.col = "black",
+         tl.srt=45,
+         number.digits=2,
+         number.font=0.4,
+         col = NULL)       # Color palette
 
 
 #Binned Scatterplot
