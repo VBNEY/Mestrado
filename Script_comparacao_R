@@ -1,0 +1,497 @@
+
+library(mise)
+print('teste') 
+mise()
+plot('x')
+gc()
+rm(list = ls())
+options(scipen=999)#Não utilizar notação cientifica
+options(digits=5)
+options(max.print=9999)
+
+library(pryr)
+library(dplyr)
+library(randomForest)
+library(MASS)#stepAIC
+library(rpart)
+library(neuralnet)
+library(rpart.plot)
+#library(doParallel)
+#cores <-5
+#getDoParWorkers()
+#cl <- makeCluster(cores)
+#registerDoParallel(cores)
+
+
+nfold_check<-function(y_test,y_model_prob,infoextra=c(),infoextra2=c(),seed=1,metrica_max='GMean',tolerancia_metrica=0.01, show_all=F){
+  df<-data.frame(ytest =y_test,yprobpred=y_model_prob )
+  df<-df[sample(nrow(df)),]	
+  print("------------------------------------------------------------------")
+  print(infoextra)
+  print(infoextra2)
+  print('Métricas disponíveis para maximizar: F1, Accuracy, MCC, Jaccard, GMean, abserrordif')
+  
+  # require(ROCR)
+  # forestpred<-prediction(y_model_prob, y_test)
+  # forestperf<-performance(forestpred, 'tpr', 'fpr')
+  # auc<-performance(forestpred, 'auc')
+  # print(auc)
+  
+  true_Y <- y_test  
+  probs <- y_model_prob
+  getROC_AUC <- function(probs, true_Y){
+    probsSort = sort(probs, decreasing = TRUE, index.return = TRUE)
+    val = unlist(probsSort$x)
+    idx = unlist(probsSort$ix)  
+    
+    roc_y = true_Y[idx];
+    stack_x = cumsum(roc_y == 0)/sum(roc_y == 0)
+    stack_y = cumsum(roc_y == 1)/sum(roc_y == 1)    
+    
+    auc = sum((stack_x[2:length(roc_y)]-stack_x[1:length(roc_y)-1])*stack_y[2:length(roc_y)])
+    return(list(stack_x=stack_x, stack_y=stack_y, auc=auc))
+  }
+  aList <- getROC_AUC(probs, true_Y) 
+  stack_x <- unlist(aList$stack_x)
+  stack_y <- unlist(aList$stack_y)
+  auc <- unlist(aList$auc)
+  print(paste0('AUC: ',auc))
+  
+  
+  set.seed(seed)
+  p<-2.5
+  n1<-1
+  tabela_resumo <- data.frame(P=0,T0M0=0,T1M1=0,T1M0=0,T0M1=0)
+  while (p<=99){
+    tabela_resumo[n1,"P"]<-p/100
+    tabela_resumo[n1,"T1M1"]<-NROW(df[df$yprobpred>=p/100 & df$ytest==1,])
+    tabela_resumo[n1,"T1M0"]<-NROW(df[df$yprobpred<p/100 & df$ytest==1,])
+    tabela_resumo[n1,"T0M0"]<-NROW(df[df$yprobpred<p/100 & df$ytest==0,])
+    tabela_resumo[n1,"T0M1"]<-NROW(df[df$yprobpred>=p/100 & df$ytest==0,])
+    n1<-n1+1
+    p<-p+1.25
+  }
+  
+  tabela_resumo$Recall<- tabela_resumo$T1M1/(tabela_resumo$T1M1+tabela_resumo$T1M0)
+  tabela_resumo$Precision<- tabela_resumo$T1M1/(tabela_resumo$T1M1+tabela_resumo$T0M1)
+  tabela_resumo$F1<- 2*(tabela_resumo$Precision*tabela_resumo$Recall)/(tabela_resumo$Recall+tabela_resumo$Precision)
+  tabela_resumo$Accuracy<-(tabela_resumo$T1M1+tabela_resumo$T0M0)/(tabela_resumo$T1M1+tabela_resumo$T0M0+tabela_resumo$T1M0+tabela_resumo$T0M1)
+  tabela_resumo$abserrordif<-abs(tabela_resumo$T0M1-tabela_resumo$T1M0)
+  tabela_resumo$MCC<-(tabela_resumo$T1M1*tabela_resumo$T0M0 - tabela_resumo$T0M1*tabela_resumo$T1M0)/
+    sqrt((tabela_resumo$T1M1+tabela_resumo$T0M1)*(tabela_resumo$T1M1+tabela_resumo$T1M0)*
+           (tabela_resumo$T0M0+tabela_resumo$T0M1)*(tabela_resumo$T0M0+tabela_resumo$T1M0))
+  tabela_resumo$Jaccard<-(tabela_resumo$T1M1)/(tabela_resumo$T1M1+tabela_resumo$T1M0+tabela_resumo$T0M1)
+  tabela_resumo$GMean<-sqrt(tabela_resumo$Recall*tabela_resumo$Precision)
+  
+  #coloca NA em dados infinitos
+  tabela_resumo[mapply(is.infinite, tabela_resumo)] <- 0
+  tabela_resumo[,c('P',metrica_max)]
+  
+  plot(x=tabela_resumo[,'P'], y=tabela_resumo[,metrica_max], main = paste(metrica_max," : ",infoextra2),
+       xlab = paste("Cutoff ",metrica_max), ylab = "%", xlim = c(0,1), ylim = c(0,1),pch = 19, frame = FALSE,col="green")
+  
+  #otimiza a métrica escolhida, com a tolerância escolhida
+  tabela_resumo<-tabela_resumo[tabela_resumo$P>0.02 & tabela_resumo$P<0.98,]
+  if(metrica_max=='abserrordif'){
+    vetor_cutoff<-tabela_resumo[,metrica_max]==min(tabela_resumo[,metrica_max],na.rm=TRUE)
+  }else{
+    vetor_cutoff<-tabela_resumo[,metrica_max]>=(max(tabela_resumo[,metrica_max],na.rm=TRUE)*(1-tolerancia_metrica))}
+  
+  #Otimização do ponto de corte
+  tabela_resumo<-tabela_resumo[vetor_cutoff,]
+  tabela_resumo<-tabela_resumo[which(rowMeans(is.na(tabela_resumo)) < 0.3),]
+  if(mean(tabela_resumo$Precision)>mean(tabela_resumo$Recall)){
+    id_segunda_metrica<-c('MCC','Recall','Precision')
+  }else{
+    id_segunda_metrica<-c('MCC','Precision','Recall')}
+  
+  for(metrica in setdiff(id_segunda_metrica,metrica_max)){
+    vetor_cutoff<-tabela_resumo[,metrica]==max(tabela_resumo[,metrica],na.rm=TRUE)
+    tabela_resumo<-tabela_resumo[vetor_cutoff,]}
+  cutoff_indicado<-mean(tabela_resumo[vetor_cutoff,1])
+  if(is.na(cutoff_indicado)){cutoff_indicado<-0}
+  
+  
+  for(cutoff_uso in c(cutoff_indicado)){#,cutoff_indicado1,cutoff_indicado2,cutoff_indicado3
+    print(paste('Cutoff indicado ',metrica_max,': ',cutoff_uso))
+    
+    Union_table<-data.frame(TARGET =df$ytest,PRED_DEF=ifelse(df$yprobpred>=cutoff_uso,1,0) )
+    print(prop.table(table(Union_table[,c('TARGET','PRED_DEF')]))*100)
+    print(table(Union_table[,c('TARGET','PRED_DEF')]))
+    
+    tabela_resumo <- data.frame(n=0,T0M0=0,T1M1=0,T1M0=0,T0M1=0)
+    folds <- cut(seq(1,nrow(df)),breaks=10,labels=FALSE)	
+    #Perform 10 fold cross validation
+    for(i in 1:10){
+      #Segment your data by fold using the which() function 
+      testIndexes <- which(folds==i,arr.ind=TRUE)
+      df_temp<-df[testIndexes,]
+      
+      tabela_resumo[i,"n"]<-i
+      tabela_resumo[i,"T1M1"]<-NROW(df_temp[df_temp$yprobpred>=cutoff_uso & df_temp$ytest==1,])
+      tabela_resumo[i,"T1M0"]<-NROW(df_temp[df_temp$yprobpred<cutoff_uso & df_temp$ytest==1,])
+      tabela_resumo[i,"T0M0"]<-NROW(df_temp[df_temp$yprobpred<cutoff_uso & df_temp$ytest==0,])
+      tabela_resumo[i,"T0M1"]<-NROW(df_temp[df_temp$yprobpred>=cutoff_uso & df_temp$ytest==0,])
+    }
+    
+    tabela_resumo$Recall<- tabela_resumo$T1M1/(tabela_resumo$T1M1+tabela_resumo$T1M0)
+    tabela_resumo$Precision<- tabela_resumo$T1M1/(tabela_resumo$T1M1+tabela_resumo$T0M1)
+    tabela_resumo$F1<- 2*(tabela_resumo$Precision*tabela_resumo$Recall)/(tabela_resumo$Recall+tabela_resumo$Precision)
+    tabela_resumo$Accuracy<-(tabela_resumo$T1M1+tabela_resumo$T0M0)/(tabela_resumo$T1M1+tabela_resumo$T0M0+tabela_resumo$T1M0+tabela_resumo$T0M1)
+    tabela_resumo$MCC<-(tabela_resumo$T1M1*tabela_resumo$T0M0 - tabela_resumo$T0M1*tabela_resumo$T1M0)/
+      sqrt((tabela_resumo$T1M1+tabela_resumo$T0M1)*(tabela_resumo$T1M1+tabela_resumo$T1M0)*
+             (tabela_resumo$T0M0+tabela_resumo$T0M1)*(tabela_resumo$T0M0+tabela_resumo$T1M0))
+    tabela_resumo$Jaccard<-(tabela_resumo$T1M1)/(tabela_resumo$T1M1+tabela_resumo$T1M0+tabela_resumo$T0M1)
+    tabela_resumo$TP<-tabela_resumo$T1M1
+    tabela_resumo$TN<-tabela_resumo$T0M0
+    tabela_resumo$FP<-tabela_resumo$T0M1
+    tabela_resumo$FN<-tabela_resumo$T1M0
+    tabela_resumo$GMean<-sqrt(tabela_resumo$Recall*tabela_resumo$Precision)
+    
+    tabela_resumo$RandomAccuracy<-((tabela_resumo$TN+tabela_resumo$FP)*(tabela_resumo$TN+tabela_resumo$FN)+
+                                     (tabela_resumo$FN+tabela_resumo$TP)*(tabela_resumo$FP+tabela_resumo$TP))/
+      ((tabela_resumo$TP+tabela_resumo$TN+tabela_resumo$FP+tabela_resumo$FN)*
+         (tabela_resumo$TP+tabela_resumo$TN+tabela_resumo$FP+tabela_resumo$FN))
+    tabela_resumo$Kappa<-(tabela_resumo$Accuracy-tabela_resumo$RandomAccuracy)/(1-tabela_resumo$RandomAccuracy)
+    
+    tabela_resumo<-tabela_resumo[,c("n","Accuracy","F1","Recall","Precision","MCC","Jaccard","GMean","Kappa","TP","TN","FP","FN")]
+    
+    tabela_resumo[11,1]<-'Mean'
+    tabela_resumo[11,2]<-mean(tabela_resumo[1:10,2],na.rm=TRUE)
+    tabela_resumo[11,3]<-mean(tabela_resumo[1:10,3],na.rm=TRUE)
+    tabela_resumo[11,4]<-mean(tabela_resumo[1:10,4],na.rm=TRUE)
+    tabela_resumo[11,5]<-mean(tabela_resumo[1:10,5],na.rm=TRUE)
+    tabela_resumo[11,6]<-mean(tabela_resumo[1:10,6],na.rm=TRUE)
+    tabela_resumo[11,7]<-mean(tabela_resumo[1:10,7],na.rm=TRUE)
+    tabela_resumo[11,8]<-mean(tabela_resumo[1:10,8],na.rm=TRUE)
+    tabela_resumo[11,9]<-mean(tabela_resumo[1:10,9],na.rm=TRUE)
+    tabela_resumo[11,10]<-sum(tabela_resumo[1:10,10],na.rm=TRUE)
+    tabela_resumo[11,11]<-sum(tabela_resumo[1:10,11],na.rm=TRUE)
+    tabela_resumo[11,12]<-sum(tabela_resumo[1:10,12],na.rm=TRUE)
+    tabela_resumo[11,13]<-sum(tabela_resumo[1:10,13],na.rm=TRUE)
+    
+    tabela_resumo[12,1]<-'sd'
+    tabela_resumo[12,2]<-sd(tabela_resumo[1:10,2],na.rm=TRUE)
+    tabela_resumo[12,3]<-sd(tabela_resumo[1:10,3],na.rm=TRUE)
+    tabela_resumo[12,4]<-sd(tabela_resumo[1:10,4],na.rm=TRUE)
+    tabela_resumo[12,5]<-sd(tabela_resumo[1:10,5],na.rm=TRUE)
+    tabela_resumo[12,6]<-sd(tabela_resumo[1:10,6],na.rm=TRUE)
+    tabela_resumo[12,7]<-sd(tabela_resumo[1:10,7],na.rm=TRUE)
+    tabela_resumo[12,8]<-sd(tabela_resumo[1:10,8],na.rm=TRUE)
+    tabela_resumo[12,9]<-sd(tabela_resumo[1:10,9],na.rm=TRUE)
+    
+    tabela_resumo2<-tabela_resumo[tabela_resumo[,1]=='Mean',]
+    tabela_resumo2[,1]<-'Result'
+    tabela_resumo2$Recall<- tabela_resumo2$TP/(tabela_resumo2$TP+tabela_resumo2$FN)
+    tabela_resumo2$Precision<- tabela_resumo2$TP/(tabela_resumo2$TP+tabela_resumo2$FP)
+    tabela_resumo2$F1<- 2*(tabela_resumo2$Precision*tabela_resumo2$Recall)/(tabela_resumo2$Recall+tabela_resumo2$Precision)
+    tabela_resumo2$Accuracy<-(tabela_resumo2$TP+tabela_resumo2$TN)/(tabela_resumo2$TP+tabela_resumo2$TN+tabela_resumo2$FN+tabela_resumo2$FP)
+    tabela_resumo2$MCC<-(tabela_resumo2$TP*tabela_resumo2$TN - tabela_resumo2$FP*tabela_resumo2$FN)/
+      sqrt((tabela_resumo2$TP+tabela_resumo2$FP)*(tabela_resumo2$TP+tabela_resumo2$FN)*
+             (tabela_resumo2$TN+tabela_resumo2$FP)*(tabela_resumo2$TN+tabela_resumo2$FN))
+    tabela_resumo2$Jaccard<-(tabela_resumo2$TP)/(tabela_resumo2$TP+tabela_resumo2$FN+tabela_resumo2$FP)
+    tabela_resumo2$GMean<-sqrt(tabela_resumo2$Recall*tabela_resumo2$Precision)
+    tabela_resumo2$RandomAccuracy<-((tabela_resumo2$TN+tabela_resumo2$FP)*(tabela_resumo2$TN+tabela_resumo2$FN)+
+                                      (tabela_resumo2$FN+tabela_resumo2$TP)*(tabela_resumo2$FP+tabela_resumo2$TP))/
+      ((tabela_resumo2$TP+tabela_resumo2$TN+tabela_resumo2$FP+tabela_resumo2$FN)*
+         (tabela_resumo2$TP+tabela_resumo2$TN+tabela_resumo2$FP+tabela_resumo2$FN))
+    tabela_resumo2$Kappa<-(tabela_resumo2$Accuracy-tabela_resumo2$RandomAccuracy)/(1-tabela_resumo2$RandomAccuracy)
+    tabela_resumo2$RandomAccuracy<-NULL
+    tabela_resumo<-rbind(tabela_resumo,tabela_resumo2)
+    print(tabela_resumo[11:13,])
+    print("------------------------------------------------------------------")
+  }
+  tabela_resumo$Cutoff<-cutoff_uso
+  tabela_resumo$auc<-auc
+  
+  resumo<-tabela_resumo[ifelse(show_all==T,11,13):13,]
+  return(resumo) 
+}
+
+#---------------------------------------
+comparacao_dados<-data.frame(n="",Accuracy=0.0,F1=0.0,Recall=0.0,Precision=0.0,MCC=0.0,Jaccard=0.0,GMean=0.0,Kappa=0.0,
+                             TP=0,TN=0.0,FP=0.0,FN=0.0,Cutoff=0.0,auc=0.0,Modelo="",Fold=0,Seed=0,tempo=0,stringsAsFactors = F)
+comparacao_dados<-comparacao_dados[comparacao_dados$Accuracy>0,]
+
+#Carregando a base dados
+BD ='AmostragemBS.csv'
+data_set_original <- read.table(file = BD, header = TRUE, sep=';',dec = ",", stringsAsFactors = FALSE)
+str(data_set_original)
+
+integer_names<- rownames(data.frame(which(sapply( data_set_original, class ) == 'integer' )))
+data_set_original[integer_names]<-data.frame(lapply(data_set_original[integer_names], function(x) as.numeric(x)))
+
+#Define variável de interesse----------------------
+TARGET<-c('ID_DEF')
+cbind(freq=table(data_set_original[,TARGET]), perc=prop.table(table(data_set_original[,TARGET]))*100)
+
+
+seed<-1
+fold<-10
+var_importance<-F
+id_randomforest<-T
+id_glm<-T
+id_rpart<-T
+id_ann<-T
+
+for(seed in 1:3){#seed.........................................................................................................................
+  set.seed(seed)
+  data_set_original<-data_set_original[sample(nrow(data_set_original)),]
+  folds <- cut(seq(1,nrow(data_set_original)),breaks=10,labels=FALSE)
+  
+  for(fold in 1:10){#Perform 10 fold cross validation..............................................................................................................................................................................................
+    
+    #Segment your data by fold using the which() function 
+    testIndexes <- which(folds==fold,arr.ind=TRUE)
+    dataset_amostra<-data_set_original[testIndexes,]
+    dataset<-data_set_original[-testIndexes,]
+    
+    #seleciona apenas dados numéricos
+    #TRAIN_VECTOR<- rownames(data.frame(which(sapply( dataset, class ) == 'numeric' )))
+    #TRAIN_VECTOR<-setdiff(TRAIN_VECTOR,c(TARGET,'ID_AMOSTRA','SEQ_ID','random1'))
+    TRAIN_VECTOR<-c('C','Si','Mn','P','Al','Nb','Ti','B','Cu','Cr','N','CEQV','Corte')
+    
+    dataset_ann<-apply(data_set_original[,c(TRAIN_VECTOR,TARGET)], MARGIN = 2, FUN = function(X) (X - min(X))/diff(range(X)))
+    dataset_amostra_ann<-dataset_ann[testIndexes,]
+    dataset_ann<-dataset_ann[-testIndexes,]
+    rm(testIndexes)
+    
+    
+        if(id_rpart==T){#Executa rpart....................................
+          formula_lm  <- as.formula(paste(TARGET, "~", paste(TRAIN_VECTOR, collapse="+")))
+          
+          dtini_full<-Sys.time()
+          fit <- rpart(formula = formula_lm,method ="class" , data = dataset,control = rpart.control(minsplit=40,cp = 0.001,maxdepth =5))
+          dtfim_full<-Sys.time()
+          tempo_full<-as.numeric(difftime(dtfim_full, dtini_full, units = c("secs")), units = "secs")/60
+          
+          y_pred <- predict(fit, newdata = dataset_amostra,type="prob")
+          df_compilado<-data.frame(ytest =as.vector(dataset_amostra[,TARGET]),yprobpred=as.vector(y_pred[,2]))
+          resumo_temp<-nfold_check(df_compilado[,1],df_compilado[,2],infoextra='rpart', infoextra2='Rpart',seed=seed)
+          comparacao_dados<-rbind(comparacao_dados,data.frame(resumo_temp,Modelo='Rpart',Fold=fold,Seed=seed,tempo=tempo_full))
+          rpart.plot(fit)
+          
+          rm(fit,y_pred,df_compilado,resumo_temp)
+          }#Executa rpart....................................
+    
+    
+        if(id_randomforest==T){#Executa random forest.............................................................................................................
+          dtini_full<-Sys.time()
+          classifier <- randomForest(x = dataset[,TRAIN_VECTOR],y = factor(ifelse(dataset[,TARGET]==1, 'Y', 'N')),keep.forest=TRUE,importance=var_importance)
+          dtfim_full<-Sys.time()
+          tempo_full<-as.numeric(difftime(dtfim_full, dtini_full, units = c("secs")), units = "secs")/60
+          
+          y_pred <- predict(classifier, newdata = dataset_amostra,type="prob")
+          df_compilado<-data.frame(ytest =as.vector(dataset_amostra[,TARGET]),yprobpred=as.vector(y_pred[,2]))
+          resumo_temp<-nfold_check(df_compilado[,1],df_compilado[,2],infoextra='rf', infoextra2='RF',seed=seed)
+          comparacao_dados<-rbind(comparacao_dados,data.frame(resumo_temp,Modelo='RF',Fold=fold,Seed=seed,tempo=tempo_full))
+          
+          if(var_importance==T){
+            importancia_temp<-importance(classifier)
+            if(exists("importancia")){
+              importancia_temp<-data.frame(variaveis=rownames(importancia_temp),importancia_temp[][],seed=seed,fold=fold,amostragem=tipo_amostragem_simples)
+              importancia<-rbind(importancia,importancia_temp)
+            }else{
+              importancia<-data.frame(variaveis=rownames(importancia_temp),importancia_temp[][],seed=seed,fold=fold,amostragem=tipo_amostragem_simples)}}
+          rm(classifier,y_pred,df_compilado,resumo_temp)
+        }#Executa random forest....................................
+        
+    
+        if(id_glm==T){#Executa glm.................................
+          logitMod<-glm(formula = paste(TARGET, "~", paste(TRAIN_VECTOR, collapse="+")),data =dataset, family=binomial(link="logit"))
+          logitMod_step<-stepAIC(logitMod, trace = FALSE) #modelo com as variáveis selecionadas por stepAIC
+          
+          #extração das variáveis relevantes
+          vetor_relevante<-as.data.frame(round(coef(summary(logitMod_step))[,4],5))
+          vetor_relevante<-setdiff(rownames(vetor_relevante[vetor_relevante[,1]<=0.1,,drop=F]),'(Intercept)')
+          if(length(vetor_relevante)==0){vetor_relevante<-TRAIN_VECTOR}
+          
+          dtini_full<-Sys.time()
+          logitMod<-glm(formula = paste(TARGET, "~", paste(vetor_relevante, collapse="+")),data =dataset, family=binomial(link="logit"))
+          dtfim_full<-Sys.time()
+          tempo_full<-as.numeric(difftime(dtfim_full, dtini_full, units = c("secs")), units = "secs")/60
+          
+          y_pred<-data.frame(Y=predict(logitMod, dataset_amostra, type="response"))  
+          df_compilado<-data.frame(ytest =as.vector(dataset_amostra[,TARGET]),yprobpred=as.vector(y_pred[,1]))
+          resumo_temp<-nfold_check(df_compilado[,1],df_compilado[,2],infoextra='RL', infoextra2='RL',seed=seed)
+          comparacao_dados<-rbind(comparacao_dados,data.frame(resumo_temp,Modelo='RL',Fold=fold,Seed=seed,tempo=tempo_full))
+          
+          summary(logitMod)
+          
+          rm(logitMod,y_pred,df_compilado,resumo_temp)
+        }#Executa glm.................................................................................................................................................
+    
+        if(id_ann==T){
+          nneuronio<-c(length(TRAIN_VECTOR),length(TRAIN_VECTOR)*2+1)
+          for(nn_temp in nneuronio){
+            formula = paste(TARGET, "~", paste(TRAIN_VECTOR, collapse="+"))
+            
+            dtini_full<-Sys.time()
+            ANN <- neuralnet(formula,data = dataset_ann,threshold = 0.1049,hidden = c(nn_temp),
+                             act.fct='logistic',lifesign = 'full',stepmax=150000,rep=1,linear.output=F)
+            dtfim_full<-Sys.time()
+            tempo_full<-as.numeric(difftime(dtfim_full, dtini_full, units = c("secs")), units = "secs")/60
+            
+            #plot(ANN)
+            y_pred = predict(ANN, newdata =dataset_amostra_ann)
+            y_pred<-data.frame(y_pred)
+  
+            df_compilado<-data.frame(ytest =as.vector(dataset_amostra_ann[,TARGET]),yprobpred=as.vector(y_pred[,1]))
+            resumo_temp<-nfold_check(df_compilado[,1],df_compilado[,2],infoextra=paste0('ANN',nn_temp), infoextra2='tipo_amostragem',seed=seed)
+            comparacao_dados<-rbind(comparacao_dados,data.frame(resumo_temp,Modelo=paste0('ANN',nn_temp),Fold=fold,Seed=seed,tempo=tempo_full))
+            rm(ANN,y_pred,df_compilado,resumo_temp)
+          }
+        }
+   
+  print(fold) 
+  write.table(comparacao_dados, file="comparacao_dados_rf_glm_rpart_ann_parcial.csv",row.names=F,sep=";")
+  }#fim de loop do fold...............................................................................................................................................
+}#fim de loop da semente..............................................................................................................................................
+
+
+write.table(comparacao_dados, file="comparacao_dados_rf_glm_rpart_ann.csv",row.names=F,sep=";")
+
+
+#write.table(comparacao_dados, file="resumo_cv10x3sementes2v4.csv",row.names=FALSE,sep=";")
+#comparacao_dados1 <- read.table(file = "comparacao_dados_rf_glm_rpart_ann.csv", header = TRUE, sep=';',dec = ".", stringsAsFactors = FALSE)
+comparacao_dados<-comparacao_dados1[comparacao_dados1[,'n']=='Result',]
+inteiro <- which(sapply( comparacao_dados, class ) == 'integer' )
+comparacao_dados[inteiro]<-data.frame(lapply(comparacao_dados[inteiro], function(x) as.numeric(gsub(",",".",gsub(" ","", x)))))
+
+
+
+library(ggplot2)
+Classe<-"Method"
+Metrica<-'GMean'
+mydata <- comparacao_dados[comparacao_dados$n=='Result' & comparacao_dados$Accuracy>0,c('Modelo',Metrica)]
+
+names(mydata) <- c(Classe, Metrica)
+mydata<-data.frame(lapply(mydata, function(x) {if(is.character(x)) gsub("Sampling", "", x) else x }),stringsAsFactors = F)
+mydata<-data.frame(lapply(mydata, function(x) {if(is.character(x)) gsub("entire", "", x) else x }),stringsAsFactors = F)
+mydata<-data.frame(lapply(mydata, function(x) {if(is.character(x)) gsub("  ", " ", x) else x }),stringsAsFactors = F)
+mydata<-mydata[!grepl("Plus|25|50",mydata[,Classe]),] #excluindo 12.5 ou 25 ou 50
+
+mydata[,Classe]<-factor(mydata[,Classe])
+mydata[,Classe]<- with(mydata,reorder(mydata[,Classe],mydata[,Metrica],function(x) mean(x)*-1))
+
+#Funções utilizadas no boxplot
+means <- aggregate(as.formula(paste(Metrica,'~',Classe)), mydata, function(x) round(mean(x),3))
+min.mean.sd.max <- function(x) {	
+  r <- c(quantile(x,0), quantile(x,0.25), mean(x), quantile(x,0.75), quantile(x,1))	
+  names(r) <- c("ymin", "lower", "middle", "upper", "ymax")	
+  r	
+}	
+
+p1 <- ggplot(data=mydata, aes(x=mydata[,Classe], y=mydata[,Metrica]))
+p1 <- p1 + theme_classic()+
+  stat_summary(fun.data = min.mean.sd.max, geom = "boxplot", shape=18) +
+  geom_text(data = means, aes(label = means[,Metrica],x = means[,Classe], y = means[,Metrica] ), vjust = -0.40, hjust = -0.80)+
+  geom_jitter(position=position_jitter(width=.2), size=3) + 
+  ggtitle(paste0("Boxplot - ", Metrica," Comparação (3x10fold-CV)")) + xlab(Classe) + ylab(Metrica)+
+  theme(text = element_text(size=20),axis.text.x = element_text(angle=45, hjust=1),legend.position = "none")+
+  coord_cartesian(ylim = c(0.25, 1))
+plot(p1)
+
+
+#-----------------------------------------------------------------------------------------------------------------------
+
+
+BD ='D:/Users/n11176/OneDrive - ArcelorMittal/Documents/LR_ID__BS.txt'
+dataset_filtro <- read.table(file = BD, header = TRUE, sep='\t',dec = ",", stringsAsFactors = FALSE)
+str(dataset_filtro)
+
+BD ='AmostragemBS.csv'
+data_set_original <- read.table(file = BD, header = TRUE, sep=';',dec = ",", stringsAsFactors = FALSE)
+str(data_set_original)
+
+filtro<-data_set_original$Corte<=500 
+filtro_C_Mn<- filtro & data_set_original$C<=0.20 & data_set_original$Mn<=0.8 & data_set_original$Nb<=0.01 &
+             data_set_original$Ti<=0.01 & data_set_original$Cr<=0.1 & data_set_original$Cu<=0.1 & data_set_original$Al<=0.1
+filtro_Q7<- filtro & data_set_original$C>=0.05 & data_set_original$Mn>=1.2 & data_set_original$Nb>=0.02 &
+  data_set_original$Ti<=0.01 & data_set_original$Cr<=0.1 & data_set_original$Cu<=0.1 & data_set_original$Al<=0.1
+
+
+dataset_filtro<-data_set_original[filtro,]
+aco<-'; SAE 1010'
+
+
+par(mfrow = c(4, 4))
+colunas_interesse<-c('C','Si','Mn','P','S','Al','Nb','Ti','V','B','Cu','Cr','Ni','N','CEQV','Corte')
+for(i in colunas_interesse)
+  hist(dataset_filtro[,i], main = i, xlab = ifelse(i=='Corte','mm','%'),axes = T,probability = T)
+summary(dataset_filtro[,colunas_interesse])
+
+
+#Binned Scatterplot
+library('ggplot2')
+require(gridExtra)
+compute_group = function(data, xequal_range=T, bins = 10,incerteza_p=T) {
+  bins     <- min(floor(nrow(data)/10), bins)
+  if(xequal_range==T){
+    x_bin    <- ggplot2::cut_interval(data$x + 1e-12*runif(nrow(data)), bins)
+  }else{
+    x_bin    <- ggplot2::cut_number(data$x + 1e-12*runif(nrow(data)), bins) 
+  }
+  
+  x_means  <- stats::ave(data$x, x_bin, FUN = mean)
+  y_means  <- stats::ave(data$y, x_bin, FUN = mean)
+  y_se     <- stats::ave(data$y, x_bin, FUN = sd)
+  y_obs    <- stats::ave(data$y, x_bin, FUN = length)
+  
+  if(incerteza_p==T){
+    ymax = y_means + qt(0.975,y_obs)*sqrt(y_means*(1-y_means)/y_obs)
+    ymin = y_means - qt(0.975,y_obs)*sqrt(y_means*(1-y_means)/y_obs)
+  }else{
+    ymax = y_means + qt(0.975,y_obs)*ifelse(is.na(y_se),0,y_se)/sqrt(y_obs)
+    ymin = y_means - qt(0.975,y_obs)*ifelse(is.na(y_se),0,y_se)/sqrt(y_obs)
+  }
+  
+  def_decimal<-ifelse(min(x_means)<0.01,4,
+                ifelse(min(x_means)<0.1,3,
+                    ifelse(min(x_means)<1,2,
+                      ifelse(min(x_means)<10,1,0))))
+  
+  result   <- data.frame(x    = round(x_means,def_decimal), 
+                         y    = y_means, 
+                         ymax = ifelse(ymax>1,1,ymax),
+                         ymin = ifelse(ymin<0,0,ymin),
+                         nobs = y_obs,
+                         y_se = y_se)
+  result   <-result[order(result[,'x']),]
+  result   <- unique(result)
+  return(result)
+}
+
+
+myplots <- list()
+for(i in colunas_interesse){
+  nome_coluna<-i
+  ndata<-NROW(dataset_filtro)
+  data.bin<-compute_group(data.frame(x=dataset_filtro[,nome_coluna],y=dataset_filtro[,'ID_DEF']),incerteza_p=T)
+  largura_erro<-(max(data.bin[,'x'])-min(data.bin[,'x']))/10*0.1
+  
+  aco<-''
+  p2<-ggplot(data.bin,aes(x,y))+theme_classic()+geom_point()+
+  ggtitle(paste0('Defeito BS',' [IC 95%]',' pelo ',nome_coluna,' ; N=',ndata,aco),
+                ' (Somente um oxicorte longitudinal)')+
+  scale_x_continuous(breaks=round(seq(min(data.bin[,'x']),max(data.bin[,'x']),(max(data.bin[,'x'])-min(data.bin[,'x']))/10),4))+
+  xlab(nome_coluna) + ylab('Índice defeito')+
+  geom_text(data = data.bin, aes(label = format(round(y,2),nsmall = 2,scientific = FALSE),x, y), hjust = -0.40,size=4.5,colour='black')+
+  geom_errorbar(aes(ymin = ymin, ymax = ymax),width = largura_erro)+
+  geom_area(aes(y =nobs/sum(nobs)), fill = alpha("deepskyblue3",0.1))+
+  scale_y_continuous(sec.axis = sec_axis(~./1, name = "Densidade"))+
+  theme(text = element_text(size=20),axis.text.x = element_text(angle=45, hjust=1),
+          axis.title.y = element_text(color = "black"),axis.line.y.right = element_line(color = "deepskyblue3"),
+          axis.ticks.y.right = element_line(color = "deepskyblue3"),axis.title.y.right = element_text(color = "deepskyblue3"),
+          axis.text.y.right = element_text(color = "deepskyblue3"))+
+  coord_cartesian(ylim = c(0, 1))
+  myplots[[i]] <- p2
+}
+#grid.arrange(grobs=myplots[1:4])
+#source("http://peterhaschke.com/Code/multiplot.R")
+#multiplot(plotlist = myplots, cols = 4)
+
+plot(myplots$CEQV)
+
+
+
